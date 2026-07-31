@@ -33,16 +33,14 @@ impl Module for MetaDump {
                 .get_module_dir()
                 .context("get_module_dir")?;
 
-            let mut list_file = unsafe {
-                fs::File::from_raw_fd(
-                    nix::fcntl::openat(
-                        Some(module_dir.as_raw_fd()),
-                        "list.txt",
-                        nix::fcntl::OFlag::O_CLOEXEC,
-                        nix::sys::stat::Mode::empty(),
-                    )?,
-                )
-            };
+            let mut list_file = fs::File::from_raw_fd(
+                nix::fcntl::openat(
+                    Some(module_dir.as_raw_fd()),
+                    "list.txt",
+                    nix::fcntl::OFlag::O_CLOEXEC,
+                    nix::sys::stat::Mode::empty(),
+                )?,
+            );
             let mut list_content = String::new();
             list_file.read_to_string(&mut list_content)?;
 
