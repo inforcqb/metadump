@@ -1,0 +1,7 @@
+id=metadump
+name=Metadata Dumper
+version=1.0
+versionCode=1
+author=inforcqb
+description=Dump dmabuf:METADATA from DarakuGear process
+validated=0

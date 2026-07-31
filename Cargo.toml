@@ -1,0 +1,23 @@
+[package]
+name = "metadump"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+log = "0.4"
+zygisk-rs = { git = "https://github.com/Tools-cx-app/zygisk-rs.git", default-features = false, features = ["v4"] }
+
+[lib]
+name = "metadump"
+crate-type = ["dylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
+
+[profile.release]
+strip = "symbols"
+opt-level = 3
+debug = 0
+lto = "fat"
+codegen-units = 1

@@ -1,0 +1,27 @@
+name: Build metadump
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          target: aarch64-linux-android
+          override: true
+
+      - run: cargo install just cargo-ndk
+
+      - name: Build release
+        run: just package-release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metadump-zip
+          path: out/metadump-*.zip
