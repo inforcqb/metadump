@@ -23,7 +23,7 @@ impl Module for MetaDump {
     }
 
     fn pre_app_specialize(&mut self, args: &mut AppSpecializeArgs) {
-        let inner = || -> anyhow::Result<()> {
+        let mut inner = || -> anyhow::Result<()> {
             let package_name = self
                 .env
                 .get_string(&unsafe { jni::objects::JString::from_raw(*args.nice_name) })?
