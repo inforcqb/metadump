@@ -120,15 +120,16 @@ dump:
 
     /* Dump all dmabuf:METADATA regions */
     total = 0;
+    char dump_line[512];
     FILE *maps = fopen("/proc/self/maps", "r");
     if (!maps) { close(out_fd); return; }
 
-    while (fgets(line, sizeof(line), maps)) {
+    while (fgets(dump_line, sizeof(dump_line), maps)) {
         unsigned long s, e;
-        char perms[8] = {0}, p[256] = {0};
-        if (sscanf(line, "%lx-%lx %4s %*x %*s %*d %255s", &s, &e, perms, p) < 3)
+        char d_perms[8] = {0}, d_path[256] = {0};
+        if (sscanf(dump_line, "%lx-%lx %4s %*x %*s %*d %255s", &s, &e, d_perms, d_path) < 3)
             continue;
-        if (!strstr(p, "dmabuf:METADATA")) continue;
+        if (!strstr(d_path, "dmabuf:METADATA")) continue;
 
         size_t size = e - s;
         const char *ptr = (const char *)(unsigned long)s;
