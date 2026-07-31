@@ -1,14 +1,11 @@
 /**
- * metadump.c - Stealth in-process dmabuf metadata dumper
+ * metadump.c - Polling dmabuf metadata dumper for DarakuGear
  *
- * Loaded via LSPosed/Zygisk into com.pinkcore.darakugear process.
- * Constructor scans /proc/self/maps for dmabuf:METADATA and dumps.
+ * Constructor auto-runs on dlopen. Since dmabuf:METADATA may not be
+ * mapped yet at Application.attach(), we poll /proc/self/maps for up
+ * to 30 seconds waiting for the region to appear.
  *
- * STEALTH FEATURES:
- * - Writes to app's private data dir (not /data/local/tmp)
- * - Tries multiple output paths, preferring app-internal storage
- * - No logging to logcat (avoids detection)
- * - Fail-silent: returns cleanly on any error
+ * Uses LOGI/LOGE macros for logcat visibility.
  */
 
 #include <stdio.h>
@@ -18,116 +15,146 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <android/log.h>
+
+#define TAG "metadump"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 #define TARGET_PROCESS "com.pinkcore.darakugear"
+#define POLL_MAX_RETRIES 60
+#define POLL_INTERVAL_MS 500000
 
-/* Preferred output paths in order of stealthiness */
+/* Preferred output paths in order */
 static const char *OUTPUT_PATHS[] = {
     "/data/data/com.pinkcore.darakugear/files/metadata_dump.bin",
-    "/data/user/0/com.pinkcore.darakugear/files/metadata_dump.bin",
     "/sdcard/Android/data/com.pinkcore.darakugear/files/metadata_dump.bin",
-    "/data/local/tmp/metadata_dump.bin",  /* fallback */
+    "/data/local/tmp/metadata_dump.bin",
     NULL
 };
 
-/* Marker confirms success */
 static const char *MARKER_PATH =
-    "/data/data/com.pinkcore.darakugear/files/metadata_dump.done";
+    "/data/local/tmp/metadata_dump.done";
 
 __attribute__((constructor))
 void dump_metadata(void) {
     char cmdline[256] = {0};
-    FILE *maps;
-    char line[512];
-    int out_fd = -1;
-    unsigned long total = 0;
-    const char *out_path = NULL;
+    int cmdfd, out_fd;
+    unsigned long total;
+    const char *out_path;
+    int attempt;
 
-    /* Check if we're in the target process */
-    int cmdfd = open("/proc/self/cmdline", O_RDONLY);
-    if (cmdfd < 0) return;
+    LOGI("=== metadump.so constructor called ===");
+
+    /* Verify we're in the target process */
+    cmdfd = open("/proc/self/cmdline", O_RDONLY);
+    if (cmdfd < 0) { LOGE("cannot open /proc/self/cmdline"); return; }
     ssize_t n = read(cmdfd, cmdline, sizeof(cmdline) - 1);
     close(cmdfd);
-    if (n <= 0) return;
+    if (n <= 0) { LOGE("empty cmdline"); return; }
 
-    if (!strstr(cmdline, TARGET_PROCESS)) return;
+    if (!strstr(cmdline, TARGET_PROCESS)) {
+        LOGI("not target process, exiting");
+        return;
+    }
+    LOGI("target process confirmed");
 
-    /* Try output paths in order */
+    /* Poll for dmabuf:METADATA */
+    for (attempt = 0; attempt < POLL_MAX_RETRIES; attempt++) {
+        FILE *maps = fopen("/proc/self/maps", "r");
+        if (!maps) { LOGE("cannot open /proc/self/maps"); return; }
+
+        char line[512];
+        int found = 0;
+        unsigned long start = 0, end = 0;
+        char path[256] = {0};
+
+        while (fgets(line, sizeof(line), maps)) {
+            char perms[8];
+            int fields = sscanf(line, "%lx-%lx %4s %*x %*s %*d %255s",
+                               &start, &end, perms, path);
+            if (fields >= 3 && strstr(path, "dmabuf:METADATA")) {
+                found = 1;
+                break;
+            }
+        }
+        fclose(maps);
+
+        if (found) {
+            LOGI("dmabuf:METADATA found at %lx-%lx (attempt %d)", start, end, attempt);
+            goto dump;
+        }
+
+        if (attempt == 0) {
+            LOGI("dmabuf:METADATA not mapped yet, polling...");
+        }
+        if (attempt % 10 == 1 && attempt > 0) {
+            LOGI("poll attempt %d...", attempt);
+        }
+        usleep(POLL_INTERVAL_MS);
+    }
+
+    LOGE("dmabuf:METADATA never appeared after %d attempts", POLL_MAX_RETRIES);
+    return;
+
+dump:
+    /* Open output file */
+    out_fd = -1;
+    out_path = NULL;
     for (int i = 0; OUTPUT_PATHS[i] != NULL; i++) {
-        /* Ensure parent directory exists */
+        /* Ensure parent dir exists */
         char dir[256];
         strncpy(dir, OUTPUT_PATHS[i], sizeof(dir) - 1);
         dir[sizeof(dir) - 1] = '\0';
         char *slash = strrchr(dir, '/');
-        if (slash) {
-            *slash = '\0';
-            mkdir(dir, 0755);  /* ignore error, might already exist */
-        }
+        if (slash) { *slash = '\0'; mkdir(dir, 0755); }
 
-        out_fd = open(OUTPUT_PATHS[i],
-                      O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        out_fd = open(OUTPUT_PATHS[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (out_fd >= 0) {
             out_path = OUTPUT_PATHS[i];
             break;
         }
     }
+    if (out_fd < 0) { LOGE("all output paths failed"); return; }
+    LOGI("writing to %s", out_path);
 
-    if (out_fd < 0) return;  /* all output paths failed, silent exit */
-
-    /* Open process memory map */
-    maps = fopen("/proc/self/maps", "r");
+    /* Dump all dmabuf:METADATA regions */
+    total = 0;
+    FILE *maps = fopen("/proc/self/maps", "r");
     if (!maps) { close(out_fd); return; }
 
     while (fgets(line, sizeof(line), maps)) {
-        unsigned long start, end;
-        char perms[8] = {0};
-        char path[256] = {0};
-        int fields;
+        unsigned long s, e;
+        char perms[8] = {0}, p[256] = {0};
+        if (sscanf(line, "%lx-%lx %4s %*x %*s %*d %255s", &s, &e, perms, p) < 3)
+            continue;
+        if (!strstr(p, "dmabuf:METADATA")) continue;
 
-        fields = sscanf(line, "%lx-%lx %4s %*x %*s %*d %255s",
-                       &start, &end, perms, path);
-
-        if (fields < 2) continue;
-
-        /* Match dmabuf:METADATA regions */
-        if (fields >= 3 && strstr(path, "dmabuf:METADATA")) {
-            size_t size = end - start;
-
-            /* Read in chunks to avoid SIGSEGV on partial mappings */
-            const char *ptr = (const char *)(unsigned long)start;
-            size_t remaining = size;
-            while (remaining > 0) {
-                size_t chunk = remaining > 4096 ? 4096 : remaining;
-                ssize_t written = write(out_fd, ptr, chunk);
-                if (written <= 0) break;
-                ptr += written;
-                remaining -= written;
-                total += written;
-            }
+        size_t size = e - s;
+        const char *ptr = (const char *)(unsigned long)s;
+        size_t remaining = size;
+        while (remaining > 0) {
+            size_t chunk = remaining > 4096 ? 4096 : remaining;
+            ssize_t written = write(out_fd, ptr, chunk);
+            if (written <= 0) break;
+            ptr += written;
+            remaining -= written;
+            total += written;
         }
+        LOGI("dumped %lx-%lx (%zu bytes)", s, e, size);
     }
-
     fclose(maps);
     close(out_fd);
 
-    /* Write done marker (in app private dir) */
-    if (total > 0) {
-        char marker_dir[256];
-        strncpy(marker_dir, MARKER_PATH, sizeof(marker_dir) - 1);
-        char *slash = strrchr(marker_dir, '/');
-        if (slash) {
-            *slash = '\0';
-            mkdir(marker_dir, 0755);
-        }
+    LOGI("=== DUMP COMPLETE: %lu bytes to %s ===", total, out_path);
 
-        int marker = open(MARKER_PATH,
-                         O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        if (marker >= 0) {
-            char buf[128];
-            int len = snprintf(buf, sizeof(buf),
-                              "dumped %lu bytes to %s\n", total, out_path);
-            write(marker, buf, len);
-            close(marker);
-        }
+    /* Write marker */
+    int marker = open(MARKER_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (marker >= 0) {
+        char buf[128];
+        int len = snprintf(buf, sizeof(buf),
+                          "dumped %lu bytes to %s\n", total, out_path);
+        write(marker, buf, len);
+        close(marker);
     }
 }
