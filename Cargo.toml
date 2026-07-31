@@ -9,6 +9,7 @@ log = "0.4"
 jni = "0.21"
 jni-sys = "0.3"
 nix = { version = "0.29", features = ["fs"] }
+libc = "0.2"
 zygisk-rs = { git = "https://github.com/Tools-cx-app/zygisk-rs.git", default-features = false, features = ["v4"] }
 
 [lib]

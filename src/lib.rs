@@ -1,56 +1,67 @@
 use anyhow::Context;
-use jni::JNIEnv;
 use log::{error, info};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use zygisk_rs::{register_zygisk_module, Api, AppSpecializeArgs, Module, ServerSpecializeArgs};
+
+static IS_TARGET: AtomicBool = AtomicBool::new(false);
 
 struct MetaDump {
     api: Api,
-    env: JNIEnv<'static>,
 }
 
 impl Module for MetaDump {
-    fn new(api: Api, env: *mut jni::sys::JNIEnv) -> Self {
+    fn new(api: Api, _env: *mut jni::sys::JNIEnv) -> Self {
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(log::LevelFilter::Info)
                 .with_tag("metadump"),
         );
-        let env = unsafe { JNIEnv::from_raw(env).unwrap() };
-        Self { api, env }
+        Self { api }
     }
 
     fn pre_app_specialize(&mut self, args: &mut AppSpecializeArgs) {
-        let mut inner = || -> anyhow::Result<()> {
-            let package_name = self
-                .env
-                .get_string(&unsafe { jni::objects::JString::from_raw(*args.nice_name) })?
-                .to_string_lossy()
-                .to_string();
-            info!("pre_app_specialize: {}", package_name);
+        IS_TARGET.store(false, Ordering::Relaxed);
 
+        let inner = || -> anyhow::Result<()> {
+            // Only check list.txt to decide if we target this app.
+            // Avoid JNI in system processes to prevent crashes.
             let module_dir = self
                 .api
                 .get_module_dir()
                 .context("get_module_dir")?;
+
             let mut list_file = unsafe {
-                std::fs::File::from_raw_fd(
+                fs::File::from_raw_fd(
                     nix::fcntl::openat(
                         Some(module_dir.as_raw_fd()),
                         "list.txt",
                         nix::fcntl::OFlag::O_CLOEXEC,
                         nix::sys::stat::Mode::empty(),
-                    )?
+                    )?,
                 )
             };
             let mut list_content = String::new();
             list_file.read_to_string(&mut list_content)?;
 
+            // Read package name from nice_name (raw pointer)
+            let nice_name_ptr = unsafe { *args.nice_name };
+            if nice_name_ptr.is_null() {
+                self.api
+                    .set_option(zygisk_rs::ModuleOption::DlcloseModuleLibrary);
+                return Ok(());
+            }
+
+            // Safe: just check if the pointer contains our target string
+            let len = unsafe { libc::strlen(nice_name_ptr as *const libc::c_char) };
+            let slice = unsafe { std::slice::from_raw_parts(nice_name_ptr as *const u8, len) };
+            let package_name = String::from_utf8_lossy(slice);
+
             let found = list_content
                 .lines()
-                .any(|item| item.trim() == package_name);
+                .any(|item| item.trim() == package_name.trim());
 
             if !found {
                 self.api
@@ -58,6 +69,7 @@ impl Module for MetaDump {
                 return Ok(());
             }
 
+            IS_TARGET.store(true, Ordering::Relaxed);
             info!("metadump: targeting {}", package_name);
             Ok(())
         };
@@ -70,8 +82,12 @@ impl Module for MetaDump {
     }
 
     fn post_app_specialize(&mut self, _args: &AppSpecializeArgs) {
-        // This runs INSIDE the child process after fork!
-        // Spawn a thread to wait for metadata to load, then dump dmabuf
+        // ONLY run in the target app process
+        if !IS_TARGET.load(Ordering::Relaxed) {
+            return;
+        }
+
+        // Spawn a thread to wait for metadata to load
         std::thread::spawn(|| {
             for i in 0..60 {
                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -141,7 +157,6 @@ fn dump_dmabuf_metadata() -> anyhow::Result<usize> {
         return Err(anyhow::anyhow!("no dmabuf:METADATA regions found"));
     }
 
-    // Write confirmation marker
     fs::write(
         "/data/local/tmp/metadata_dump.done",
         format!("dumped {} bytes\n", total),
