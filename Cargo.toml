@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 log = "0.4"
+jni = "0.21"
+jni-sys = "0.3"
 zygisk-rs = { git = "https://github.com/Tools-cx-app/zygisk-rs.git", default-features = false, features = ["v4"] }
 
 [lib]

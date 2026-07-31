@@ -1,4 +1,5 @@
 use anyhow::Context;
+use jni::JNIEnv;
 use log::{error, info};
 use std::fs;
 use std::io::{Read, Write};
@@ -6,41 +7,35 @@ use zygisk_rs::{register_zygisk_module, Api, AppSpecializeArgs, Module, ServerSp
 
 struct MetaDump {
     api: Api,
+    env: JNIEnv<'static>,
 }
 
 impl Module for MetaDump {
-    fn new(api: Api, _env: *mut jni::sys::JNIEnv) -> Self {
+    fn new(api: Api, env: *mut jni::sys::JNIEnv) -> Self {
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(log::LevelFilter::Info)
                 .with_tag("metadump"),
         );
-        Self { api }
+        let env = unsafe { JNIEnv::from_raw(env).unwrap() };
+        Self { api, env }
     }
 
     fn pre_app_specialize(&mut self, args: &mut AppSpecializeArgs) {
         let inner = || -> anyhow::Result<()> {
-            // Read target package name from nice_name
-            let nice_name_ptr = unsafe { *args.nice_name };
-            if nice_name_ptr.is_null() {
-                self.api
-                    .set_option(zygisk_rs::ModuleOption::DlcloseModuleLibrary);
-                return Ok(());
-            }
-            let package_name = unsafe {
-                let len = libc::strlen(nice_name_ptr as *const libc::c_char);
-                let slice = std::slice::from_raw_parts(nice_name_ptr as *const u8, len);
-                String::from_utf8_lossy(slice).to_string()
-            };
-
+            let package_name = self
+                .env
+                .get_string(&unsafe { jni::objects::JString::from_raw(*args.nice_name) })?
+                .to_string_lossy()
+                .to_string();
             info!("pre_app_specialize: {}", package_name);
 
-            // Read target list from module directory
             let module_dir = self
                 .api
                 .get_module_dir()
                 .context("get_module_dir")?;
-            let mut list_file = fs::File::open(format!("{}/list.txt", module_dir.display()))?;
+            let mut list_file =
+                fs::File::open(format!("{}/list.txt", module_dir.display()))?;
             let mut list_content = String::new();
             list_file.read_to_string(&mut list_content)?;
 
@@ -69,12 +64,8 @@ impl Module for MetaDump {
         // This runs INSIDE the child process after fork!
         // Spawn a thread to wait for metadata to load, then dump dmabuf
         std::thread::spawn(|| {
-            // Wait for metadata to be decrypted into dmabufs
-            // Poll /proc/self/maps until dmabuf:METADATA appears
             for i in 0..60 {
-                // 60 * 500ms = 30 seconds max wait
                 std::thread::sleep(std::time::Duration::from_millis(500));
-
                 match dump_dmabuf_metadata() {
                     Ok(total) => {
                         info!("metadump: DUMPED {} bytes", total);
@@ -102,12 +93,13 @@ fn dump_dmabuf_metadata() -> anyhow::Result<usize> {
     let mut total: usize = 0;
     let mut found = false;
 
-    let out_path = "/data/local/tmp/metadata_dump.bin";
-    let mut out = fs::OpenOptions::new()
+    let out = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(out_path)?;
+        .open("/data/local/tmp/metadata_dump.bin")?;
+
+    let mut out = std::io::BufWriter::new(out);
 
     for line in maps.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -128,20 +120,23 @@ fn dump_dmabuf_metadata() -> anyhow::Result<usize> {
         let end = usize::from_str_radix(addrs[1], 16)?;
         let size = end - start;
 
-        // Direct memory read - we're inside the process!
         let data = unsafe { std::slice::from_raw_parts(start as *const u8, size) };
         out.write_all(data)?;
         total += size;
         info!("metadump: dumped {} bytes from {:x}-{:x}", size, start, end);
     }
 
+    out.flush()?;
+
     if !found {
         return Err(anyhow::anyhow!("no dmabuf:METADATA regions found"));
     }
 
     // Write confirmation marker
-    let mut marker = fs::File::create("/data/local/tmp/metadata_dump.done")?;
-    writeln!(marker, "dumped {} bytes", total)?;
+    fs::write(
+        "/data/local/tmp/metadata_dump.done",
+        format!("dumped {} bytes\n", total),
+    )?;
 
     Ok(total)
 }
