@@ -3,6 +3,7 @@ use jni::JNIEnv;
 use log::{error, info};
 use std::fs;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
 use zygisk_rs::{register_zygisk_module, Api, AppSpecializeArgs, Module, ServerSpecializeArgs};
 
 struct MetaDump {
