@@ -124,7 +124,7 @@ impl Module for MetaDump {
         flog("[metadump]   spawning dump thread");
         std::thread::spawn(|| {
             flog("[metadump] dump thread started");
-            for i in 0..60 {
+            for i in 0..240 {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 flog(&format!("[metadump] poll attempt {}", i));
                 match dump_dmabuf_metadata() {

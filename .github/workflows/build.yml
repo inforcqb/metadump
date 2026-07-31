@@ -13,7 +13,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: nightly
-          target: aarch64-linux-android
+          target: aarch64-linux-android,armv7-linux-androideabi
           override: true
 
       - run: cargo install just cargo-ndk
