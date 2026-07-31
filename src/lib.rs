@@ -10,13 +10,23 @@ use zygisk_rs::{register_zygisk_module, Api, AppSpecializeArgs, Module, ServerSp
 
 static IS_TARGET: AtomicBool = AtomicBool::new(false);
 
-// Fallback file logging in case android_logger doesn't work
+// Fallback file logging - try multiple paths
 fn flog(msg: &str) {
-    let _ = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open("/data/local/tmp/metadump.log")
-        .and_then(|mut f| writeln!(f, "{}", msg));
+    let paths = [
+        "/data/local/tmp/metadump.log",
+        "/sdcard/metadump.log",
+    ];
+    for path in &paths {
+        if std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .and_then(|mut f| writeln!(f, "{}", msg))
+            .is_ok()
+        {
+            return;
+        }
+    }
 }
 
 struct MetaDump {
@@ -123,8 +133,9 @@ impl Module for MetaDump {
 
         flog("[metadump]   spawning dump thread");
         std::thread::spawn(|| {
-            flog("[metadump] dump thread started");
-            for i in 0..240 {
+                flog("[metadump] dump thread started (infinite poll)");
+            let mut i: u64 = 0;
+            loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 flog(&format!("[metadump] poll attempt {}", i));
                 match dump_dmabuf_metadata() {
@@ -140,9 +151,8 @@ impl Module for MetaDump {
                         }
                     }
                 }
+                i += 1;
             }
-            flog("[metadump] TIMEOUT - no dmabuf found");
-            error!("metadump: timeout waiting for dmabuf:METADATA");
         });
         flog("[metadump] post_app_specialize() done");
     }
